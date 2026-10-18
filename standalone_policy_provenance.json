@@ -1,0 +1,20 @@
+{
+  "profile_count": 12,
+  "observations": 360,
+  "source_sha256": {
+    "facebook_high_image_measurement.csv": "5bb151ab4602933434d02ec461efa2278d09459708d6d9e5e37fcb245136dde9",
+    "facebook_high_video_measurement.csv": "b75e622bbe73aa3126eabd594c3b76856f5baa3cfc319abe0a22a1ee00452a8e",
+    "facebook_low_image_measurement.csv": "0fddd9ea8b147c1e6dbb5242f20f9655132edbc536f3533300a81f9b05cabb55",
+    "facebook_low_video_measurement.csv": "f5b6803b38704f06057f237b3a93ecc4ca1f81135308ae9498ccc768b30ab239",
+    "facebook_mid_image_measurement.csv": "43c83c30e8cf42fdc102a7536eb7dd355a22496a966b756bea727aed19eba283",
+    "facebook_mid_video_measurement.csv": "304d8acac96b9c3cdcc78df55b0c598ea9d58cd01f8602c04185e2c1ccdbdd03",
+    "instagram_high_image_measurement.csv": "aa0a35bcd7b883e47556069e4370fc564e65c3dccbcb19013f4a048c9d1bda93",
+    "instagram_high_video_measurement.csv": "101624e7ee01201cbde78bec270359df7df9420489a442cd32d08c81ca880d7b",
+    "kakao_low_image_measurement.csv": "8a99a9ae954821174d36a557fce4476f0b3baa1442e780cf67a3ac5e2654f319",
+    "kakao_normal_image_measurement.csv": "6e3e595a2f6acb15f38e60c3d9cc194154089f16e09b0307fd48b40b347ebf53",
+    "kakao_original_image_measurement.csv": "08b6287f25cb4d1b8bdad31721ab92f71fc697831099a0e786baf345e389d2a2",
+    "kakao_video_measurement.csv": "953a36be0a7e4f7d16bd7e8f29005c2c0e3be03bd509f304ec938138f8e2a386"
+  },
+  "source_kind": "aggregate medians by platform/modality/quality/band/orientation/verdict",
+  "no_csv_at_runtime": true
+}
