@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
 .env
@@ -10,6 +11,7 @@ venv/
 measurements/
 *.csv
 augmented/
+out/
 outputs/
 checkpoints/
 models/
