@@ -1,7 +1,5 @@
 {
-  "profile_count": 12,
-  "observations": 360,
-  "source_sha256": {
+  "source_csv_sha256": {
     "facebook_high_image_measurement.csv": "5bb151ab4602933434d02ec461efa2278d09459708d6d9e5e37fcb245136dde9",
     "facebook_high_video_measurement.csv": "b75e622bbe73aa3126eabd594c3b76856f5baa3cfc319abe0a22a1ee00452a8e",
     "facebook_low_image_measurement.csv": "0fddd9ea8b147c1e6dbb5242f20f9655132edbc536f3533300a81f9b05cabb55",
@@ -15,6 +13,8 @@
     "kakao_original_image_measurement.csv": "08b6287f25cb4d1b8bdad31721ab92f71fc697831099a0e786baf345e389d2a2",
     "kakao_video_measurement.csv": "953a36be0a7e4f7d16bd7e8f29005c2c0e3be03bd509f304ec938138f8e2a386"
   },
-  "source_kind": "aggregate medians by platform/modality/quality/band/orientation/verdict",
-  "no_csv_at_runtime": true
+  "unique_empirical_observations": 360,
+  "profiles": 12,
+  "conditional_cells": 65,
+  "notes": "Derived once from measured CSVs. Runtime CSV dependency: none. Uploaded source measurements omitted from public repository."
 }
