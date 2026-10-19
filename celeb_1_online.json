@@ -1,0 +1,25 @@
+{
+  "mode": "online-image",
+  "platform": "facebook",
+  "quality": "low",
+  "band": "le1080",
+  "orientation": "port",
+  "execution": "jpeg-reencode",
+  "recipe_id": "FACEBOOK_IMAGE_LOW_LE1080_PORT_02",
+  "recipe_source_row_ordinal": 2,
+  "geometry": {
+    "scale_x": 0.6666666666666666,
+    "scale_y": 0.6666666666666666,
+    "center_crop_assumed": false
+  },
+  "photo": {
+    "applied": true,
+    "b": -0.002546,
+    "a": 1.000126
+  },
+  "jpeg": {
+    "qf": 93,
+    "subsampling": "4:2:0",
+    "progressive": true
+  }
+}
