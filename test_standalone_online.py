@@ -4,6 +4,8 @@ Run: python -m unittest -v test_standalone_online.py
 """
 import csv
 import hashlib
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -160,6 +162,44 @@ class StableOnlineTests(unittest.TestCase):
                     self.assertEqual(tmp_path.read_bytes(),
                                      b"deterministic transcoded bytes")
                 self.assertFalse(tmp_path.exists())
+
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
+                         "FFmpeg required for real video integration")
+    def test_real_video_same_decoded_frames_on_repeated_calls(self):
+        """Exercise the actual Standalone calibration + encode pipeline twice."""
+        src = self.root / "real_video.mp4"
+        subprocess.run([
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24",
+            "-frames:v", "8", "-c:v", "libx264",
+            "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(src),
+        ], check=True)
+        def decode_hash(path):
+            raw = subprocess.run([
+                "ffmpeg", "-nostdin", "-loglevel", "error",
+                "-i", str(path), "-an", "-map", "0:v:0",
+                "-vf", "scale=160:160:flags=bilinear,format=gray",
+                "-frames:v", "4", "-f", "rawvideo",
+                "-pix_fmt", "gray", "pipe:1"
+            ], check=True, capture_output=True).stdout
+            return hashlib.sha256(raw).hexdigest()
+
+        signatures = []
+        metadata = []
+        for _ in range(2):
+            with self.aug.augment_video(
+                src, key="video/real-001", force_platform="facebook",
+                force_quality="low"
+            ) as (output, info):
+                signatures.append(decode_hash(output))
+                metadata.append((info["sample_seed"],
+                                 info["reference_row_ordinal"],
+                                 info["platform"], info["quality"]))
+                tmp_path = output
+            self.assertFalse(tmp_path.exists())
+        self.assertEqual(signatures[0], signatures[1])
+        self.assertEqual(metadata[0], metadata[1])
 
     def test_invalid_keys_rejected(self):
         for key in ("", " ", "/absolute/path", " whitespace "):
