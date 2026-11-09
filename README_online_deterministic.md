@@ -1,19 +1,19 @@
 # Deterministic online augmentation for Standalone v2
 
 This module is an **additive implementation** based on the existing
-\`platform_aware_augment_standalone.py\`. It calls the original
-\`MeasurementProfiles.choose\`, \`transform_image\` and \`transform_video\`
+`platform_aware_augment_standalone.py`. It calls the original
+`MeasurementProfiles.choose`, `transform_image` and `transform_video`
 functions directly. The original offline script is unchanged.
 
 ## Evaluation design: A and B see the same augmented sample
 
-1. Keep a unique, stable \`id\` per CSV sample. The ID must be **the same**
+1. Keep a unique, stable `id` per CSV sample. The ID must be **the same**
    across model A and model B. Do not use CSV row number, DataLoader batch
    index, worker ID, current time or absolute machine path as the ID.
-2. Freeze \`seed=42\`, \`epoch=0\`, \`copy_index=0\`, branch/commit, platform
+2. Freeze `seed=42`, `epoch=0`, `copy_index=0`, branch/commit, platform
    probabilities, all jitter settings and all model-independent preprocessing.
 3. A per-item RNG is seeded as
-   \`SHA256(f"{seed}|{normalized_key}|{copy_index}|{epoch}")[:8]\`,
+   `SHA256(f"{seed}|{normalized_key}|{copy_index}|{epoch}")[:8]`,
    following the existing standalone implementation.
 4. Each sample is independently augmented; CSV shuffle, DataLoader worker
    order, and interleaving unrelated samples cannot consume its random stream.
@@ -28,13 +28,13 @@ functions directly. The original offline script is unchanged.
 
 ## CSV example
 
-\`\`\`csv
+```csv
 id,path,label
 image-001,images/001.jpg,real
 image-002,images/002.jpg,fake
-\`\`\`
+```
 
-\`\`\`python
+```python
 from standalone_online import (
     CSVOnlineImageDataset, OnlineConfig, StandaloneOnlineAugmentor,
 )
@@ -51,7 +51,7 @@ sample = dataset[0]
 image = sample["image"]               # PIL.Image
 metadata = sample["augmentation"]     # JSON-serializable recipe + transform
 # Model-specific preprocessing (resize/normalize/tensor) comes AFTER this step.
-\`\`\`
+```
 
 For a PyTorch DataLoader use an image-to-tensor transform before default
 collation, and avoid persistent worker epoch changes unless you propagate the
@@ -59,7 +59,7 @@ new config to all worker replicas. For **fixed evaluation**, keep epoch=0.
 
 ### Videos
 
-\`\`\`python
+```python
 with aug.augment_video(
     "/media/NAS/test/video001.mp4",
     key="video-001", copy_index=0,
@@ -68,20 +68,20 @@ with aug.augment_video(
     model_input = decode_video(augmented_path)
     predictions = evaluate(model_input)
 # Temporary output no longer exists here.
-\`\`\`
+```
 
-\`decode_video\` and \`evaluate\` above are placeholders for your existing
+`decode_video` and `evaluate` above are placeholders for your existing
 evaluation code. For fair A/B comparisons, it is best to decode once and pass
 the same image tensor or video frames to both models if possible.
 
 ### Force a specific platform/quality
 
-\`\`\`python
+```python
 image, mask, info = aug.augment_image(
     "/media/NAS/test/001.jpg", key="image-001",
     force_platform="facebook", force_quality="low", return_info=True
 )
-\`\`\`
+```
 
 For a **complete per-platform robustness benchmark**, use a fixed policy
 grid instead of relying only on the 25% mixture. Keep consistent IDs and
@@ -89,7 +89,7 @@ record platform, quality, selected row ordinal, seed, and config fingerprint.
 
 ## Important limitations
 
-- The online image method uses LOCAL short-lived files under \`temp_dir\`
+- The online image method uses LOCAL short-lived files under `temp_dir`
   to call the **exact standalone image transformation**. This is on-demand
   rather than purely RAM-only, and does not fill your NAS with augmentations.
   It is not a new approximate one-pass implementation.
@@ -105,10 +105,10 @@ record platform, quality, selected row ordinal, seed, and config fingerprint.
 
 ## Verification
 
-\`\`\`bash
+```bash
 python -m unittest -v test_standalone_empirical.py test_standalone_online.py
 python -m py_compile platform_aware_augment_standalone.py standalone_online.py
-\`\`\`
+```
 
 In addition to unit tests, compare decoded images/frames from two independent
 runs with the actual FFmpeg version/environment used for the evaluation.
