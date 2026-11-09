@@ -280,50 +280,125 @@ class MeasurementProfiles:
                 print(f'{key:26} {category:14} {len(variants):2d} {dict(verdicts)}')
 
     def choose(self, platform: str, modality: str, quality: str,
-               band: str, width: int, height: int, rng: random.Random):
+               band: str, width: int, height: int, rng: random.Random,
+               *, fallback_policy: str = 'nearest'):
+        """Return one measured joint recipe and selection provenance.
+
+        The exact-path sampling is unchanged for in-distribution cases.
+        For unsupported geometry, prefer a measured row in the *same*
+        platform/modality/quality and band. Only if that band is absent
+        entirely, consider another band of the same platform/quality.
+        Selection is deterministic for a per-file RNG.
+        """
+        if fallback_policy not in ('nearest', 'strict'):
+            raise ValueError(f'Unsupported fallback policy {fallback_policy!r}')
         key = f'{platform}|{modality}|{quality}'
+        groups = self.data.get(key)
+        if not groups:
+            raise ValueError(f'No measured profile for {key}; cannot extrapolate platform or quality')
         orientation = 'land' if width > height else 'port' if height > width else 'square'
-        category = f'{band}/{orientation}'
-        observations = self.data.get(key, {}).get(category)
-        if not observations:
-            raise ValueError(f'No measured profile for {key} at {category}; no invented OOD policy')
-        # Log-aspect tolerance is a DESIGN assumption, not measured: only select
-        # similarly shaped empirical inputs to avoid mixing panoramas and portraits.
-        query_aspect = math.log(width / height)
-        distances = [abs(query_aspect - math.log(x['ow']/x['oh'])) for x in observations]
-        best = min(distances)
-        if best > 0.15:
-            raise ValueError(f'Input aspect ratio {width}/{height} too far from observed '
-                             f'{key}/{category} (distance {best:.3f}>0.15); refuse extrapolation')
-        shortlist = [v for v,d in zip(observations,distances) if d <= max(0.025,best+0.025)]
-        v = rng.choice(shortlist)
-        # Actual observed row is chosen as a correlated tuple; no aggregation.
+        requested = f'{band}/{orientation}'
+        exact = groups.get(requested)
+        log_aspect = math.log(width / height)
+
+        def aspect_distance(v):
+            return abs(log_aspect - math.log(v['ow'] / v['oh']))
+
+        # Keep the original sampler and RNG draw unchanged whenever the
+        # requested cell and aspect ratio are actually supported.
+        if exact:
+            distances = [aspect_distance(v) for v in exact]
+            best = min(distances)
+            if best <= 0.15:
+                shortlisted = [v for v, d in zip(exact, distances)
+                               if d <= max(0.025, best + 0.025)]
+                selected = rng.choice(shortlisted)
+                selected_condition = requested
+                selection_method = 'exact'
+                candidate_count = len(shortlisted)
+            elif fallback_policy == 'strict':
+                raise ValueError(
+                    f'Input aspect ratio {width}/{height} too far from observed '
+                    f'{key}/{requested} (distance {best:.3f}>0.15)')
+            else:
+                # The cell exists but the particular aspect ratio does not.
+                # Keep the same band+orientation, select its nearest real row.
+                scored = [(aspect_distance(v), v) for v in exact]
+                best = min(d for d, _ in scored)
+                choices = [v for d, v in scored if d <= best + 0.025 + 1e-12]
+                selected = rng.choice(choices)
+                selected_condition = requested
+                selection_method = 'nearest_aspect'
+                candidate_count = len(choices)
+        else:
+            if fallback_policy == 'strict':
+                raise ValueError(
+                    f'No measured profile for {key} at {requested}; no invented OOD policy')
+            # Prefer same resolution band, even when the measured orientation
+            # differs. The old CSV-based implementation used this fallback.
+            candidates = [(cell, v) for cell, variants in groups.items()
+                          if cell.split('/')[0] == band for v in variants]
+            same_band = bool(candidates)
+            if not candidates:
+                candidates = [(cell, v) for cell, variants in groups.items()
+                              for v in variants]
+            if not candidates:
+                raise ValueError(f'No measured rows for {key}')
+
+            # Match the *joint* observed row, without mixing parameters.
+            # Band fallback also accounts for resolution, as a tie-breaker.
+            log_long_edge = math.log(max(width, height))
+            def score(candidate):
+                cell, v = candidate
+                aspect = aspect_distance(v)
+                scale = abs(log_long_edge - math.log(max(v['ow'], v['oh'])))
+                return aspect if same_band else aspect + 0.35 * scale
+
+            distances = [score(c) for c in candidates]
+            best = min(distances)
+            choices = [c for c, d in zip(candidates, distances)
+                       if d <= best + 0.025 + 1e-12]
+            selected_condition, selected = rng.choice(choices)
+            selection_method = ('nearest_same_band' if same_band
+                                else 'nearest_other_band')
+            candidate_count = len(choices)
+
         row = {
-            'stimulus_id': f'embedded:{key}:{category}:row_{v["n"]:02d}',
+            'stimulus_id': f'embedded:{key}:{selected_condition}:row_{selected["n"]:02d}',
             'target_id': key,
-            'reference_profile_row_ordinal': v['n'],
-            'reencode_verdict': v['verdict'],
-            'orig_width': str(v['ow']), 'orig_height': str(v['oh']),
-            'down_width': str(v['dw']), 'down_height': str(v['dh']),
-            'crop_applied': str(v['crop']),
-            'down_estimated_jpeg_qf': str(v.get('qf') or ''),
-            'down_chroma_subsampling': v.get('subsamp','4:2:0'),
-            'down_jpeg_progressive': str(v.get('progressive',False)),
-            'down_has_icc': str(v.get('icc',False)),
-            'metadata_stripped': str(v.get('metadata','')),
-            'brightness_offset_b': str(v.get('b') if v.get('b') is not None else 0),
-            'contrast_gain_a': str(v.get('a') if v.get('a') is not None else 1),
-            'displayed_brightness_offset_b_median': str(v.get('b') if v.get('b') is not None else 0),
-            'displayed_contrast_gain_a_median': str(v.get('a') if v.get('a') is not None else 1),
-            'down_codec_name': v.get('codec','h264'),
-            'down_profile': v.get('vprofile',''),
-            'down_avg_frame_rate': str(v.get('fps') or ''),
-            'down_gop_mean': str(v.get('gop') or 150),
-            'down_has_b_frames': str(v.get('bframes',False)),
-            'bitrate_ratio': str(v.get('bitrate_ratio') or ''),
-            'effective_crf_interp': str(v.get('effective_crf') or ''),
-            'temporal_offset_frames': str(v.get('temporal_offset') or 0),
-            'reference_bpp_ratio': v.get('bpp'), 'reference_ssim': v.get('ss'),
+            'reference_profile_row_ordinal': selected['n'],
+            'reencode_verdict': selected['verdict'],
+            'orig_width': str(selected['ow']), 'orig_height': str(selected['oh']),
+            'down_width': str(selected['dw']), 'down_height': str(selected['dh']),
+            'crop_applied': str(selected['crop']),
+            'down_estimated_jpeg_qf': str(selected.get('qf') or ''),
+            'down_chroma_subsampling': selected.get('subsamp','4:2:0'),
+            'down_jpeg_progressive': str(selected.get('progressive',False)),
+            'down_has_icc': str(selected.get('icc',False)),
+            'metadata_stripped': str(selected.get('metadata','')),
+            'brightness_offset_b': str(selected.get('b') if selected.get('b') is not None else 0),
+            'contrast_gain_a': str(selected.get('a') if selected.get('a') is not None else 1),
+            'displayed_brightness_offset_b_median': str(selected.get('b') if selected.get('b') is not None else 0),
+            'displayed_contrast_gain_a_median': str(selected.get('a') if selected.get('a') is not None else 1),
+            'down_codec_name': selected.get('codec','h264'),
+            'down_profile': selected.get('vprofile',''),
+            'down_avg_frame_rate': str(selected.get('fps') or ''),
+            'down_gop_mean': str(selected.get('gop') or 150),
+            'down_has_b_frames': str(selected.get('bframes',False)),
+            'bitrate_ratio': str(selected.get('bitrate_ratio') or ''),
+            'effective_crf_interp': str(selected.get('effective_crf') or ''),
+            'temporal_offset_frames': str(selected.get('temporal_offset') or 0),
+            'reference_bpp_ratio': selected.get('bpp'), 'reference_ssim': selected.get('ss'),
+            # Audit an extrapolated reference separately from the actual transform.
+            'requested_condition': requested,
+            'selected_condition': selected_condition,
+            'selection_method': selection_method,
+            'is_extrapolated': selection_method != 'exact',
+            'aspect_log_distance': round(aspect_distance(selected), 8),
+            'size_log_distance': round(abs(
+                math.log(max(width, height) / max(selected['ow'], selected['oh']))), 8),
+            'selection_candidates': candidate_count,
+            'fallback_policy': fallback_policy,
         }
         return row, band
 
@@ -849,6 +924,10 @@ def parse_args():
     ap.add_argument('--show-profiles', action='store_true')
     ap.add_argument('--dry-run', action='store_true', help='Plan and write manifest but do not transcode or copy')
     ap.add_argument('--continue-on-error', action='store_true')
+    ap.add_argument('--fallback-policy', choices=['nearest','strict'], default='nearest',
+                    help='Handle unsupported band/aspect/orientation with closest measured '
+                         'recipe from the SAME platform+quality (default nearest). '
+                         'strict keeps the old error behavior.')
     ap.add_argument('--input-metadata', type=Path,
                     help='Optional user CSV/JSON/JSONL metadata file (NOT recipe measurements)')
     ap.add_argument('--input-metadata-key', default='source_relative_path',
@@ -983,6 +1062,7 @@ def main():
         'ig_crop_jitter_frac': args.ig_crop_jitter_frac,
         'video_preset': args.video_preset, 'force_platform': args.force_platform,
         'force_quality': args.force_quality,
+        'fallback_policy': args.fallback_policy,
         'dry_run': args.dry_run, 'skip_video_output_probe': args.skip_video_output_probe,
     }
     counts: Counter[str] = Counter()
@@ -1044,8 +1124,18 @@ def main():
                         out_suffix = src.suffix
                     else:
                         quality = pick_quality(platform, modality, rng, args.force_quality)
-                        row, _ = policy.choose(platform, modality, quality, band, w, h, rng)
+                        record['quality'] = quality
+                        row, _ = policy.choose(
+                            platform, modality, quality, band, w, h, rng,
+                            fallback_policy=args.fallback_policy)
                         record.update({'quality': quality,
+                                       'requested_condition': row['requested_condition'],
+                                       'selected_condition': row['selected_condition'],
+                                       'selection_method': row['selection_method'],
+                                       'is_extrapolated': row['is_extrapolated'],
+                                       'aspect_log_distance': row['aspect_log_distance'],
+                                       'size_log_distance': row['size_log_distance'],
+                                       'selection_candidates': row['selection_candidates'],
                                        'measured_reference_stimulus_id': row['stimulus_id'],
                                        'measured_reference_target_id': row.get('target_id'),
                                        'measured_reference_verdict': row['reencode_verdict'],
