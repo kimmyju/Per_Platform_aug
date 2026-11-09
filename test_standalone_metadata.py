@@ -207,6 +207,73 @@ class MetadataIntegrationTests(unittest.TestCase):
         self.assertEqual(by_class["Fake"]["platform"], "facebook")
         self.assertTrue(by_class["Fake"]["operation"])
 
+    def test_unsupported_landscape_uses_fallback_with_csv_provenance(self):
+        """Same sample/seed twice gives identical nearest measured row."""
+        land = self.inputs / "folder" / "landscape.jpg"
+        Image.new("RGB", (640, 480), color=(110, 20, 190)).save(land)
+        listed = self.root / "landscape.csv"
+        with listed.open("w", newline="", encoding="utf8") as fh:
+            wr = csv.DictWriter(fh, fieldnames=["filepath", "relpath", "class"])
+            wr.writeheader()
+            wr.writerow({"filepath": str(land), "relpath": "Fake/landscape.jpg",
+                         "class": "Fake"})
+        reports = []
+        for idx in range(2):
+            output = self.root / f"fallback_{idx}.csv"
+            cmd = [
+                sys.executable, str(SCRIPT),
+                "--input-list", str(listed), "--split-by-class",
+                "--output", str(self.root / f"fallback_images_{idx}"),
+                "--metadata-output", str(output),
+                "--copies", "1", "--seed", "42", "--epoch", "0",
+                "--force-platform", "kakao", "--force-quality", "low",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            with output.open(newline="", encoding="utf8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual(len(rows), 1)
+            rec = rows[0]
+            self.assertEqual(rec["status"], "ok")
+            self.assertEqual(rec["quality"], "low")
+            self.assertEqual(rec["requested_condition"], "le512/land")
+            self.assertEqual(rec["selected_condition"], "le512/port")
+            self.assertEqual(rec["selection_method"], "nearest_same_band")
+            self.assertEqual(rec["is_extrapolated"], "True")
+            self.assertEqual(json.loads(rec["input_metadata"])["class"], "Fake")
+            self.assertTrue(Path(rec["output"]).is_file())
+            with Image.open(rec["output"]) as im:
+                self.assertEqual(im.size, (640, 480))
+            reports.append(rec)
+        self.assertEqual(reports[0]["effective_sample_seed"],
+                         reports[1]["effective_sample_seed"])
+        self.assertEqual(reports[0]["reference_row_ordinal"],
+                         reports[1]["reference_row_ordinal"])
+        self.assertEqual(reports[0]["transformation"], reports[1]["transformation"])
+
+    def test_unsupported_landscape_strict_rejects_and_logs(self):
+        land = self.inputs / "folder" / "landscape.jpg"
+        Image.new("RGB", (640, 480), color=(110, 20, 190)).save(land)
+        listed = self.root / "landscape.csv"
+        listed.write_text("filepath,relpath,class\n" + str(land) +
+                          ",Fake/landscape.jpg,Fake\n", encoding="utf8")
+        report = self.root / "strict.jsonl"
+        cmd = [
+            sys.executable, str(SCRIPT),
+            "--input-list", str(listed), "--split-by-class",
+            "--output", str(self.root / "strict_out"),
+            "--metadata-output", str(report),
+            "--copies", "1", "--seed", "42",
+            "--force-platform", "kakao", "--force-quality", "low",
+            "--fallback-policy", "strict",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        record = json.loads(report.read_text(encoding="utf8").splitlines()[0])
+        self.assertEqual(record["status"], "error")
+        self.assertIn("No measured profile", record["error"])
+        self.assertEqual(record["quality"], "low")
+
     def test_filename_matching_ambiguity_is_rejected(self):
         second = self.inputs / "second"
         second.mkdir()
