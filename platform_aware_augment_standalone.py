@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from standalone_metadata import InputMetadataIndex, MetadataWriter
+
 
 
 # Training mixture 25% each is a proposed sampling distribution, not observed SNS market share.
@@ -764,6 +766,19 @@ def parse_args():
     ap.add_argument('--show-profiles', action='store_true')
     ap.add_argument('--dry-run', action='store_true', help='Plan and write manifest but do not transcode or copy')
     ap.add_argument('--continue-on-error', action='store_true')
+    ap.add_argument('--input-metadata', type=Path,
+                    help='Optional user CSV/JSON/JSONL metadata file (NOT recipe measurements)')
+    ap.add_argument('--input-metadata-key', default='source_relative_path',
+                    help='Column/key in input metadata identifying each source file')
+    ap.add_argument('--metadata-match-mode',
+                    choices=['relative_path', 'basename', 'stem'],
+                    default='relative_path',
+                    help='How input metadata keys match media files')
+    ap.add_argument('--allow-missing-input-metadata', action='store_true',
+                    help='Permit media without matching metadata; default is strict')
+    ap.add_argument('--metadata-output', type=Path,
+                    help='Optional per-output metadata location (.jsonl or .csv); '
+                         'default is output/augmentation_manifest.jsonl')
     return ap.parse_args()
 
 
@@ -796,6 +811,19 @@ def validate(a: argparse.Namespace):
         raise ValueError('Output must be separate from input')
     if a.input.resolve() in a.output.resolve().parents:
         raise ValueError('Do not place output inside input (recursive scan contamination)')
+    if a.metadata_output and a.metadata_output.suffix.lower() not in ('.jsonl', '.csv'):
+        raise ValueError('--metadata-output requires a .jsonl or .csv extension')
+    if a.input_metadata and a.input_metadata.suffix.lower() not in ('.jsonl', '.json', '.csv'):
+        raise ValueError('--input-metadata requires .csv, .jsonl or .json')
+    if a.input_metadata and a.metadata_output and (
+            a.input_metadata.resolve() == a.metadata_output.resolve()):
+        raise ValueError('Input and output metadata paths must differ')
+    if a.metadata_output and a.input.resolve() in a.metadata_output.resolve().parents:
+        raise ValueError('Do not write metadata inside input media root')
+    if a.metadata_output and a.metadata_output.resolve() == a.input_metadata.resolve() if a.input_metadata else False:
+        raise ValueError('Cannot overwrite input metadata')
+    if a.metadata_output and a.metadata_output.resolve() == (a.output / 'augmentation_manifest.jsonl').resolve():
+        pass  # normal replacement of default manifest writer
 
 
 def main():
@@ -812,11 +840,42 @@ def main():
               and p.suffix.lower() in (IMAGE_SUFFIXES|VIDEO_SUFFIXES)]
     if not inputs:
         raise RuntimeError(f'No image/video files found in {args.input}')
-    manifest = args.output / 'augmentation_manifest.jsonl'
+    manifest = args.metadata_output or args.output / 'augmentation_manifest.jsonl'
+    default_manifest = args.output / 'augmentation_manifest.jsonl'
+    if args.input_metadata is not None and args.input_metadata.resolve() == manifest.resolve():
+        raise ValueError('Metadata output would overwrite input metadata')
+    if manifest.resolve() == args.input.resolve() or manifest.resolve() in [
+            p.resolve() for p in inputs]:
+        raise ValueError('Metadata output cannot overwrite source media')
+    if args.input_metadata is not None and args.input_metadata.resolve() == default_manifest.resolve() and (
+            manifest.resolve() == default_manifest.resolve()):
+        raise ValueError('Cannot overwrite input metadata')
+    metadata_index = (InputMetadataIndex(
+        args.input_metadata, key_field=args.input_metadata_key,
+        match_mode=args.metadata_match_mode) if args.input_metadata else None)
+    if metadata_index:
+        metadata_index.validate_inputs(
+            [p.relative_to(args.input) for p in inputs],
+            allow_missing=args.allow_missing_input_metadata)
+    run_config = {
+        'seed': args.seed, 'epoch': args.epoch, 'copies': args.copies,
+        'platform_weights': dict(zip(PLATFORMS, weights)),
+        'p_photo': args.p_photo, 'photometric_sample_frames': args.photometric_sample_frames,
+        'photo_jitter': args.photo_jitter, 'jpeg_qf_jitter': args.jpeg_qf_jitter,
+        'h264_crf_jitter': args.h264_crf_jitter, 'hevc_bitrate_jitter': args.hevc_bitrate_jitter,
+        'ig_crop_jitter_prob': args.ig_crop_jitter_prob,
+        'ig_crop_jitter_frac': args.ig_crop_jitter_frac,
+        'video_preset': args.video_preset, 'force_platform': args.force_platform,
+        'force_quality': args.force_quality,
+        'dry_run': args.dry_run, 'skip_video_output_probe': args.skip_video_output_probe,
+    }
     counts: Counter[str] = Counter()
-    with manifest.open('w', encoding='utf8') as writer:
+    with MetadataWriter(manifest) as writer:
         for i, src in enumerate(inputs, 1):
             rel = src.relative_to(args.input)
+            source_metadata = (metadata_index.lookup(
+                rel, allow_missing=args.allow_missing_input_metadata)
+                if metadata_index else None)
             modality = 'image' if src.suffix.lower() in IMAGE_SUFFIXES else 'video'
             try:
                 if modality == 'image':
@@ -842,6 +901,9 @@ def main():
                 platform = args.force_platform or rng.choices(PLATFORMS, weights, k=1)[0]
                 record: dict[str, Any] = {
                     'input': str(src), 'source_relative_path': rel.as_posix(),
+                    'effective_sample_seed': stable_seed(args.seed, rel, copy_index, args.epoch),
+                    'augmentation_config': run_config,
+                    'input_metadata': source_metadata,
                     'copy_index': copy_index, 'seed': args.seed, 'epoch': args.epoch,
                     'modality': modality, 'input_size': [w, h],
                     'input_band': band, 'platform': platform,
@@ -868,7 +930,8 @@ def main():
                                        'measured_reference_target_id': row.get('target_id'),
                                        'measured_reference_verdict': row['reencode_verdict'],
                                        'reference_measurements_csv': 'embedded_empirical_joint_observation_no_runtime_csv',
-                                       'reference_row_ordinal':row.get('reference_profile_row_ordinal')})
+                                       'reference_row_ordinal':row.get('reference_profile_row_ordinal'),
+                                       'measured_recipe': row})
                         verdict = row['reencode_verdict']
                         out_suffix = (src.suffix if modality == 'image' and
                                       verdict == 'container_or_metadata_only' else
@@ -907,11 +970,10 @@ def main():
                     record['status'] = 'error'
                     record['error'] = str(exc)
                     if not args.continue_on_error:
-                        writer.write(json.dumps(record, ensure_ascii=False)+'\n')
-                        writer.flush()
+                        writer.write(record)
                         raise
                     print('WARN transform error', src, str(exc), file=sys.stderr)
-                writer.write(json.dumps(record, ensure_ascii=False)+'\n')
+                writer.write(record)
         print(f'Processed {len(inputs)} source files, {args.copies} copy/copies each')
     print('Output manifest:', manifest)
     print('Route counts:')
