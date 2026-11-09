@@ -70,7 +70,11 @@ class EmpiricalPolicyTests(unittest.TestCase):
         b, _ = policy.choose("instagram", "image", "shared", "le512",
                              544, 704, random.Random(42),
                              fallback_policy="strict")
-        self.assertEqual(a, b)
+        self.assertEqual(
+            {k: v for k, v in a.items() if k != "fallback_policy"},
+            {k: v for k, v in b.items() if k != "fallback_policy"})
+        self.assertEqual(a["reference_profile_row_ordinal"],
+                         b["reference_profile_row_ordinal"])
         self.assertFalse(a["is_extrapolated"])
         self.assertEqual(a["selection_method"], "exact")
 
