@@ -53,3 +53,16 @@ python platform_aware_augment_standalone.py --input /path/to/train --output /pat
 기본 Standalone 정책은 **12개 프로파일, 65개 해상도·방향 조건, 360개 결합된 실측 변형값**을 내장합니다. Instagram의 중복 화질은 한 프로파일로 통합됩니다. 단, 실제 플랫폼 인코더를 완전히 복제하는 코드는 아닙니다. Instagram 중앙 크롭, 보간법, 인코더 프리셋, 플랫폼 25% 혼합 비율 등의 일부는 **구현상 가정·학습 설정값**입니다.
 
 밝기·대비는 인코딩 뒤 측정해 목표값과 잔차 보정을 시도하지만, 코드의 광도 추정기는 원래 포렌식 측정기와 동일하지 않습니다. **최종 출력의 SSIM, PSNR, 압축률, 밝기·대비가 실측 분포를 재현하는지는 별도로 검증해야 합니다.** 측정 CSV 원본과 학습·평가 데이터는 이 공개 저장소에 포함하지 않았습니다.
+
+## Deterministic online evaluation (CSV 기반, NAS 증강본 저장 불필요)
+
+[standalone_online.py](./standalone_online.py)는 **이 브랜치의 기존 Standalone v2 변환 함수를 직접 재사용**하는 Online API입니다. 고정된 CSV 샘플 ID와 `seed=42, epoch=0, copy_index=0`을 사용하므로 CSV 행 순서나 DataLoader 처리 순서가 달라도 같은 샘플에는 같은 레시피가 선택됩니다.
+
+- 이미지: 변환 후 PIL 이미지로 반환, 임시 JPEG는 즉시 삭제
+- 영상: context manager 안에서만 임시 MP4를 제공하고 사용 후 삭제
+- 모델 A/B 비교: ID, 입력 파일, seed, 파라미터, 실행 환경 및 고정 모델 전처리 조건을 동일하게 유지
+- 메모리만 사용하는 구현은 아님: 광도 잔차 보정을 유지하기 위해 로컬 임시 파일을 사용
+- 자세한 방법: [README_online_deterministic.md](./README_online_deterministic.md)
+- 검증: `python -m unittest -v test_standalone_empirical.py test_standalone_online.py`
+
+기존 `platform_aware_augment_standalone.py` 오프라인 경로는 변경되지 않았습니다.
