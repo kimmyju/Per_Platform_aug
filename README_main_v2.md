@@ -108,3 +108,41 @@ python -m py_compile platform_aware_augment_standalone.py standalone_metadata.py
 This testing scope covers image conversion, deterministic sampled recipes,
 metadata input/output formats, missing and duplicate keys, and failures.
 It does not by itself establish exact agreement with actual SNS uploads.
+
+## Nearest measured-profile fallback (new)
+
+By default `--fallback-policy nearest` keeps the original exact matching
+when a measured band/orientation and sufficiently close aspect ratio exist.
+If not, it selects the nearest **observed joint recipe**, always within the
+same platform, modality and quality:
+
+1. Exact band + orientation + log-aspect tolerance (<= 0.15): unchanged sampler.
+2. Same band and orientation but no close aspect: nearest observed aspect.
+3. No matching orientation in the band: nearest aspect among that band.
+4. No measurements in the band: nearest aspect and long-side log size
+   across measured bands of that platform/quality.
+
+Never infer missing recipe parameters independently. The selected recipe is
+an empirical joint observation, but applying it outside its source geometry
+is an **extrapolation**, not a directly observed platform behavior.
+
+For the old strict behavior, pass `--fallback-policy strict`.
+
+The per-output CSV/JSONL now includes these keys:
+
+- `requested_condition`: e.g. `le512/land`
+- `selected_condition`: e.g. `le512/port`
+- `selection_method`: `exact`, `nearest_aspect`,
+  `nearest_same_band` or `nearest_other_band`
+- `is_extrapolated`: true for every non-exact selection
+- `aspect_log_distance`, `size_log_distance`,
+  `selection_candidates`
+
+The existing per-file SHA-256 seed and RNG ordering are preserved for
+exact-match inputs. Fallback is deterministic for a fixed input path, seed,
+copy index, epoch, policy and software environment. `metadata-output` may
+point to any accessible CSV/JSONL path; no extra NAS image cache is required.
+
+Warning: cross-orientation fallback can yield imperfect geometry, especially
+for Instagram. Review the generated image and analyze extrapolated cases
+separately if they are used in scientific performance claims.
