@@ -19,6 +19,7 @@ blindly stacking the same brightness/contrast changes. Corrections are approxima
 from __future__ import annotations
 
 import argparse
+import csv
 import io
 import tempfile
 import hashlib
@@ -29,8 +30,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 from standalone_metadata import InputMetadataIndex, MetadataWriter
@@ -730,11 +730,94 @@ def transform_video(src: Path, dst: Path, row: dict[str,str], platform: str,
             }}
 
 
+class MediaSource:
+    def __init__(self, path: Path, rel: Path, out_rel: Path,
+                 row: Optional[dict[str, Any]] = None):
+        self.path = path
+        self.rel = rel
+        self.out_rel = out_rel
+        self.row = row
+
+
+def normalize_class_name(value: Any) -> str:
+    label = str(value).strip().lower()
+    if label not in ('real', 'fake'):
+        raise ValueError(f'Output class must be real or fake, got {value!r}')
+    return label
+
+
+def class_split_relative(relpath: str, class_name: str) -> Path:
+    """Place a saved file under real/ or fake/, dropping a leading class folder."""
+    label = normalize_class_name(class_name)
+    raw = str(relpath).strip().replace('\\', '/')
+    while raw.startswith('./'):
+        raw = raw[2:]
+    parts = list(PurePosixPath(raw).parts)
+    if parts and parts[0].lower() in ('real', 'fake'):
+        parts = parts[1:]
+    if not parts:
+        raise ValueError(f'No file path remains after class split: {relpath!r}')
+    return Path(label, *parts)
+
+
+def load_listed_media(path: Path, path_key: str, rel_key: str,
+                      class_key: Optional[str]) -> list[MediaSource]:
+    if not path.is_file():
+        raise FileNotFoundError(f'Input list not found: {path}')
+    with path.open('r', encoding='utf-8-sig', newline='') as stream:
+        reader = csv.DictReader(stream)
+        fields = reader.fieldnames or []
+        if path_key not in fields:
+            raise ValueError(f'Input list is missing path column {path_key!r}: {path}')
+        if rel_key not in fields:
+            raise ValueError(f'Input list is missing relative-path column {rel_key!r}: {path}')
+        if class_key and class_key not in fields:
+            raise ValueError(f'Input list is missing class column {class_key!r}: {path}')
+        sources: list[MediaSource] = []
+        seen_rel: set[str] = set()
+        seen_out: set[str] = set()
+        for n, row in enumerate(reader, 1):
+            raw_path = str(row.get(path_key, '')).strip()
+            raw_rel = str(row.get(rel_key, '')).strip()
+            if not raw_path or not raw_rel:
+                raise ValueError(f'Empty path or relative path in {path} record {n}')
+            rel = Path(raw_rel.replace('\\', '/'))
+            rel_key_text = rel.as_posix()
+            if rel_key_text in seen_rel:
+                raise ValueError(f'Duplicate input list relative path {rel_key_text!r}')
+            seen_rel.add(rel_key_text)
+            if class_key:
+                out_rel = class_split_relative(rel_key_text, row.get(class_key, ''))
+            else:
+                out_rel = rel
+            out_key = out_rel.as_posix()
+            if out_key in seen_out:
+                raise ValueError(
+                    f'Two inputs would be saved to the same relative path {out_key!r}')
+            seen_out.add(out_key)
+            sources.append(MediaSource(Path(raw_path), rel, out_rel, dict(row)))
+    if not sources:
+        raise RuntimeError(f'No rows in input list: {path}')
+    return sources
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--measurements-dir', type=Path, default=None,
                     help='Deprecated, ignored: policy is embedded (no CSV IO)')
     ap.add_argument('--input', type=Path, help='Train media root (recursive scan)')
+    ap.add_argument('--input-list', type=Path,
+                    help='CSV listing media to augment (uses filepath/relpath columns; '
+                         'does not scan a directory)')
+    ap.add_argument('--input-list-path-key', default='filepath',
+                    help='Column in --input-list with the source file path')
+    ap.add_argument('--input-list-rel-key', default='relpath',
+                    help='Column in --input-list with the source relative path')
+    ap.add_argument('--split-by-class', action='store_true',
+                    help='Save outputs under real/ and fake/ inside --output. '
+                         'Class comes from --class-column, or from the first input folder.')
+    ap.add_argument('--class-column', default='class',
+                    help='CSV column used by --split-by-class (Fake/Real)')
     ap.add_argument('--output', type=Path, help='Augmented media root')
     ap.add_argument('--mask-root', type=Path, help='Optional image mask root, same relative paths and .png stem')
     ap.add_argument('--mask-output', type=Path, help='Required when --mask-root is supplied')
@@ -785,8 +868,16 @@ def parse_args():
 def validate(a: argparse.Namespace):
     if a.show_profiles:
         return
-    if not a.input or not a.output:
-        raise ValueError('--input and --output are required unless --show-profiles')
+    if not a.output:
+        raise ValueError('--output is required unless --show-profiles')
+    if not a.input and not a.input_list:
+        raise ValueError('--input or --input-list is required unless --show-profiles')
+    if a.input and a.input_list:
+        raise ValueError('Use either --input or --input-list, not both')
+    if a.input_list and a.input_list.suffix.lower() != '.csv':
+        raise ValueError('--input-list requires a .csv file')
+    if a.mask_root and a.input_list:
+        raise ValueError('--mask-root requires --input; it cannot be used with --input-list')
     if not (1 <= a.photometric_sample_frames <= 30):
         raise ValueError('--photometric-sample-frames must be between 1 and 30')
     if a.copies <= 0:
@@ -805,12 +896,17 @@ def validate(a: argparse.Namespace):
         raise ValueError('Invalid jitter; check parameter ranges')
     if a.h264_crf_jitter < 0 or a.h264_crf_jitter > 10:
         raise ValueError('h264_crf_jitter must be between 0 and 10')
-    if not a.input.is_dir():
-        raise ValueError(f'Input is not a directory: {a.input}')
-    if a.output.resolve() == a.input.resolve():
-        raise ValueError('Output must be separate from input')
-    if a.input.resolve() in a.output.resolve().parents:
-        raise ValueError('Do not place output inside input (recursive scan contamination)')
+    if a.input is not None:
+        if not a.input.is_dir():
+            raise ValueError(f'Input is not a directory: {a.input}')
+        if a.output.resolve() == a.input.resolve():
+            raise ValueError('Output must be separate from input')
+        if a.input.resolve() in a.output.resolve().parents:
+            raise ValueError('Do not place output inside input (recursive scan contamination)')
+    if a.input_list is not None and (
+            a.output.resolve() == a.input_list.resolve()
+            or a.output.resolve() in a.input_list.resolve().parents):
+        raise ValueError('Do not place the input list inside the output directory')
     if a.metadata_output and a.metadata_output.suffix.lower() not in ('.jsonl', '.csv'):
         raise ValueError('--metadata-output requires a .jsonl or .csv extension')
     if a.input_metadata and a.input_metadata.suffix.lower() not in ('.jsonl', '.json', '.csv'):
@@ -818,7 +914,8 @@ def validate(a: argparse.Namespace):
     if a.input_metadata and a.metadata_output and (
             a.input_metadata.resolve() == a.metadata_output.resolve()):
         raise ValueError('Input and output metadata paths must differ')
-    if a.metadata_output and a.input.resolve() in a.metadata_output.resolve().parents:
+    if a.metadata_output and a.input is not None and (
+            a.input.resolve() in a.metadata_output.resolve().parents):
         raise ValueError('Do not write metadata inside input media root')
 
 
@@ -833,16 +930,38 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     weights = [args.p_clean, args.p_facebook, args.p_instagram, args.p_kakao]
     print('Platform probability:', dict(zip(PLATFORMS, weights)))
-    inputs = [p for p in sorted(args.input.rglob('*')) if p.is_file()
-              and p.suffix.lower() in (IMAGE_SUFFIXES|VIDEO_SUFFIXES)]
-    if not inputs:
-        raise RuntimeError(f'No image/video files found in {args.input}')
+    if args.input_list:
+        sources = load_listed_media(
+            args.input_list, args.input_list_path_key, args.input_list_rel_key,
+            args.class_column if args.split_by_class else None)
+    else:
+        files = [p for p in sorted(args.input.rglob('*')) if p.is_file()
+                 and p.suffix.lower() in (IMAGE_SUFFIXES | VIDEO_SUFFIXES)]
+        if not files:
+            raise RuntimeError(f'No image/video files found in {args.input}')
+        sources = []
+        seen_out: set[str] = set()
+        for src in files:
+            rel = src.relative_to(args.input)
+            if args.split_by_class:
+                out_rel = class_split_relative(rel.as_posix(), rel.parts[0])
+            else:
+                out_rel = rel
+            out_key = out_rel.as_posix()
+            if out_key in seen_out:
+                raise ValueError(
+                    f'Two inputs would be saved to the same relative path {out_key!r}')
+            seen_out.add(out_key)
+            sources.append(MediaSource(src, rel, out_rel))
     manifest = args.metadata_output or args.output / 'augmentation_manifest.jsonl'
     default_manifest = args.output / 'augmentation_manifest.jsonl'
     if args.input_metadata is not None and args.input_metadata.resolve() == manifest.resolve():
         raise ValueError('Metadata output would overwrite input metadata')
-    if manifest.resolve() == args.input.resolve() or manifest.resolve() in [
-            p.resolve() for p in inputs]:
+    if args.input_list is not None and args.input_list.resolve() == manifest.resolve():
+        raise ValueError('Metadata output would overwrite the input list')
+    if args.input is not None and (
+            manifest.resolve() == args.input.resolve()
+            or manifest.resolve() in {s.path.resolve() for s in sources}):
         raise ValueError('Metadata output cannot overwrite source media')
     if args.input_metadata is not None and args.input_metadata.resolve() == default_manifest.resolve() and (
             manifest.resolve() == default_manifest.resolve()):
@@ -852,7 +971,7 @@ def main():
         match_mode=args.metadata_match_mode) if args.input_metadata else None)
     if metadata_index:
         metadata_index.validate_inputs(
-            [p.relative_to(args.input) for p in inputs],
+            [s.rel for s in sources],
             allow_missing=args.allow_missing_input_metadata)
     run_config = {
         'seed': args.seed, 'epoch': args.epoch, 'copies': args.copies,
@@ -868,11 +987,15 @@ def main():
     }
     counts: Counter[str] = Counter()
     with MetadataWriter(manifest) as writer:
-        for i, src in enumerate(inputs, 1):
-            rel = src.relative_to(args.input)
-            source_metadata = (metadata_index.lookup(
-                rel, allow_missing=args.allow_missing_input_metadata)
-                if metadata_index else None)
+        for i, source in enumerate(sources, 1):
+            src, rel, out_rel = source.path, source.rel, source.out_rel
+            if src.suffix.lower() not in (IMAGE_SUFFIXES | VIDEO_SUFFIXES):
+                raise ValueError(f'Unsupported media suffix: {src}')
+            if metadata_index:
+                source_metadata = metadata_index.lookup(
+                    rel, allow_missing=args.allow_missing_input_metadata)
+            else:
+                source_metadata = source.row
             modality = 'image' if src.suffix.lower() in IMAGE_SUFFIXES else 'video'
             try:
                 if modality == 'image':
@@ -933,14 +1056,15 @@ def main():
                         out_suffix = (src.suffix if modality == 'image' and
                                       verdict == 'container_or_metadata_only' else
                                       '.jpg' if modality == 'image' else '.mp4')
-                    dst = args.output / rel.parent / (f'{rel.stem}__aug{copy_index:03d}_'
-                                         f'{platform}_{quality}{out_suffix}')
+                    dst = args.output / out_rel.parent / (
+                        f'{out_rel.stem}__aug{copy_index:03d}_{platform}_{quality}{out_suffix}')
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     record['output'] = str(dst)
                     mask_src = (image_mask_for(src, args.input, args.mask_root)
-                                if modality == 'image' and args.mask_root else None)
-                    mask_dst = (args.mask_output / rel.parent /
-                                f'{rel.stem}__aug{copy_index:03d}_{platform}_{quality}.png'
+                                if modality == 'image' and args.mask_root and args.input
+                                else None)
+                    mask_dst = (args.mask_output / out_rel.parent /
+                                f'{out_rel.stem}__aug{copy_index:03d}_{platform}_{quality}.png'
                                 if mask_src and args.mask_output else None)
                     if mask_src:
                         record['input_mask'] = str(mask_src)
@@ -971,7 +1095,7 @@ def main():
                         raise
                     print('WARN transform error', src, str(exc), file=sys.stderr)
                 writer.write(record)
-        print(f'Processed {len(inputs)} source files, {args.copies} copy/copies each')
+        print(f'Processed {len(sources)} source files, {args.copies} copy/copies each')
     print('Output manifest:', manifest)
     print('Route counts:')
     for key, n in sorted(counts.items()):

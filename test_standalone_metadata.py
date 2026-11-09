@@ -158,6 +158,55 @@ class MetadataIntegrationTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Duplicate input metadata join key", run.stderr)
 
+    def test_input_list_saves_under_real_and_fake(self):
+        real = self.inputs / "Real" / "clip" / "a.jpg"
+        fake = self.inputs / "Fake" / "clip" / "a.jpg"
+        real.parent.mkdir(parents=True)
+        fake.parent.mkdir(parents=True)
+        Image.new("RGB", (1080, 608), color=(10, 20, 30)).save(real)
+        Image.new("RGB", (544, 704), color=(30, 40, 50)).save(fake)
+        listed = self.root / "frames.csv"
+        with listed.open("w", newline="", encoding="utf8") as handle:
+            writer = csv.DictWriter(
+                handle, fieldnames=["filepath", "relpath", "class", "label"])
+            writer.writeheader()
+            writer.writerow({
+                "filepath": str(real), "relpath": "Real/clip/a.jpg",
+                "class": "Real", "label": "0",
+            })
+            writer.writerow({
+                "filepath": str(fake), "relpath": "Fake/clip/a.jpg",
+                "class": "Fake", "label": "1",
+            })
+        meta = self.root / "Perturb_metadata.csv"
+        run = subprocess.run([
+            sys.executable, str(SCRIPT),
+            "--input-list", str(listed),
+            "--split-by-class",
+            "--output", str(self.root / "images"),
+            "--metadata-output", str(meta),
+            "--copies", "1",
+            "--seed", "42",
+            "--force-platform", "facebook",
+            "--force-quality", "low",
+        ], text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        with meta.open(newline="", encoding="utf8") as handle:
+            records = list(csv.DictReader(handle))
+        by_class = {json.loads(row["input_metadata"])["class"]: row for row in records}
+        self.assertEqual(len(by_class), 2)
+        real_out = Path(by_class["Real"]["output"])
+        fake_out = Path(by_class["Fake"]["output"])
+        self.assertEqual(
+            real_out.relative_to(self.root / "images").parts[:2], ("real", "clip"))
+        self.assertEqual(
+            fake_out.relative_to(self.root / "images").parts[:2], ("fake", "clip"))
+        self.assertTrue(real_out.is_file())
+        self.assertTrue(fake_out.is_file())
+        self.assertEqual(by_class["Real"]["input"], str(real))
+        self.assertEqual(by_class["Fake"]["platform"], "facebook")
+        self.assertTrue(by_class["Fake"]["operation"])
+
     def test_filename_matching_ambiguity_is_rejected(self):
         second = self.inputs / "second"
         second.mkdir()
