@@ -53,3 +53,29 @@ python platform_aware_augment_standalone.py --input /path/to/train --output /pat
 기본 Standalone 정책은 **12개 프로파일, 65개 해상도·방향 조건, 360개 결합된 실측 변형값**을 내장합니다. Instagram의 중복 화질은 한 프로파일로 통합됩니다. 단, 실제 플랫폼 인코더를 완전히 복제하는 코드는 아닙니다. Instagram 중앙 크롭, 보간법, 인코더 프리셋, 플랫폼 25% 혼합 비율 등의 일부는 **구현상 가정·학습 설정값**입니다.
 
 밝기·대비는 인코딩 뒤 측정해 목표값과 잔차 보정을 시도하지만, 코드의 광도 추정기는 원래 포렌식 측정기와 동일하지 않습니다. **최종 출력의 SSIM, PSNR, 압축률, 밝기·대비가 실측 분포를 재현하는지는 별도로 검증해야 합니다.** 측정 CSV 원본과 학습·평가 데이터는 이 공개 저장소에 포함하지 않았습니다.
+
+## main_v2: Standalone Offline + per-image/video metadata
+
+The **main_v2** branch uses the original standalone offline augmentation (no runtime
+measurement CSV dependency) and adds configurable source metadata joins and
+per-output augmentation metadata reports.
+
+```bash
+python platform_aware_augment_standalone.py \
+  --input ./inputs --output ./augmented --seed 42 \
+  --input-metadata ./labels.csv --input-metadata-key filepath \
+  --metadata-output ./reports/augmentations.csv
+```
+
+- Optional input metadata: CSV, JSON or JSONL, matched using relative path,
+  filename, or stem. Defaults to strict one-to-one file metadata matching.
+- Optional output metadata: CSV or JSONL at any user-selected accessible path;
+  includes selected empirical tuple, seed, detailed geometry/codec/photometry
+  and original per-image metadata.
+- Without these flags: outputs continue to use the original
+  `OUTPUT/augmentation_manifest.jsonl` default.
+- Full instructions: [README_main_v2.md](./README_main_v2.md)
+- Verification: `python -m unittest -v test_standalone_empirical.py test_standalone_metadata.py`.
+
+**Note:** main_v2 remains Offline-only. It does not include the experimental
+on-demand API from the separate deterministic-online feature branch.
