@@ -13,7 +13,6 @@ import csv
 import hashlib
 import json
 import random
-import shutil
 import tempfile
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -253,17 +252,13 @@ class StandaloneOnlineAugmentor:
 
         with tempfile.TemporaryDirectory(
                 prefix="standalone_vid_", dir=self.config.temp_dir) as tmp:
-            dest = Path(tmp) / (
-                "result" + (path.suffix if
-                    recipe["reencode_verdict"] == "container_or_metadata_only"
-                    else ".mp4"))
-            if recipe["reencode_verdict"] == "container_or_metadata_only":
-                shutil.copy2(path, dest)
-                record["transformation"] = "bytewise_copy"
-            else:
-                record["transformation"] = core.transform_video(
-                    path, dest, recipe, record["platform"], rng,
-                    self._args(), probe)
+            # Exactly match the existing Standalone offline main() path:
+            # every non-clean video calls transform_video, regardless of
+            # its measured reencode_verdict. Do not add an extra copy shortcut.
+            dest = Path(tmp) / "result.mp4"
+            record["transformation"] = core.transform_video(
+                path, dest, recipe, record["platform"], rng,
+                self._args(), probe)
             yield dest, record
 
 
