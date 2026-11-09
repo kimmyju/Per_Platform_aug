@@ -820,10 +820,7 @@ def validate(a: argparse.Namespace):
         raise ValueError('Input and output metadata paths must differ')
     if a.metadata_output and a.input.resolve() in a.metadata_output.resolve().parents:
         raise ValueError('Do not write metadata inside input media root')
-    if a.metadata_output and a.metadata_output.resolve() == a.input_metadata.resolve() if a.input_metadata else False:
-        raise ValueError('Cannot overwrite input metadata')
-    if a.metadata_output and a.metadata_output.resolve() == (a.output / 'augmentation_manifest.jsonl').resolve():
-        pass  # normal replacement of default manifest writer
+
 
 
 def main():
