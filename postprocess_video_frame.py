@@ -304,6 +304,17 @@ def video_frame_transform(src: Path, dst: Path, measured: dict[str, str],
             delivery = {"format": "JPEG", "extra_jpeg_reencode": True,
                         "jpeg_qf": 100, "jpeg_subsampling": "4:4:4",
                         "note": "Additional high-quality JPEG save to preserve old .jpg filename"}
+        elif ext == ".webp":
+            # WebP is allowed in the existing Perturb output tree.
+            # Lossless WebP preserves the decoded H.264/HEVC pixels without
+            # introducing a second lossy WebP compression pass.
+            with Image.open(chosen) as dec:
+                with dst.open("xb") as out:
+                    dec.convert("RGB").save(out, format="WEBP",
+                                            lossless=True, method=6)
+            delivery = {"format": "WEBP", "lossless": True,
+                        "extra_jpeg_reencode": False,
+                        "note": "Lossless WebP container for video-decoded pixels"}
         else:
             raise ValueError(f"Unsupported destination extension: {dst}")
 
@@ -598,7 +609,7 @@ def main() -> None:
             raise ValueError(f"Output must be an existing regular file: {dst}")
         if resolved in all_originals or resolved == old or resolved == frames_src:
             raise ValueError(f"Refusing to overwrite an original source: {resolved}")
-        if dst.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+        if dst.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
             raise ValueError(f"Unsupported existing image extension: {dst}")
         source = Path(frame_by_rel[row["source_relative_path"]]["filepath"])
         if not source.is_file():
