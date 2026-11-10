@@ -20,7 +20,7 @@ class PostprocessTests(unittest.TestCase):
         self.assertEqual(video_quality("kakao", "normal"), "single")
         self.assertEqual(video_quality("kakao", "original"), "single")
 
-    def test_replacement_and_metadata_without_overwriting(self):
+    def test_replacement_and_metadata_with_backed_up_in_place_overwrite(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             original_rows = []
@@ -50,8 +50,8 @@ class PostprocessTests(unittest.TestCase):
                 meta_rows.append(meta)
             frame_csv = root / "frames.csv"
             old_csv = root / "old.csv"
-            new_csv = root / "new.csv"
-            img_dir = root / "video_frame_images"
+            img_dir = root / "old"
+            backup_dir = root / "backups"
             for p, rows in [(frame_csv, original_rows), (old_csv, meta_rows)]:
                 with p.open("w", newline="", encoding="utf8") as file:
                     writer = csv.DictWriter(file, fieldnames=list(rows[0]))
@@ -60,38 +60,50 @@ class PostprocessTests(unittest.TestCase):
             initial = [frame_csv.read_bytes(), old_csv.read_bytes()]
             old_images = [Path(row["output"]).read_bytes() for row in meta_rows]
             cmd = [sys.executable, str(SCRIPT), "--frames-csv", str(frame_csv),
-                   "--metadata-csv", str(old_csv), "--metadata-output", str(new_csv),
-                   "--output-root", str(img_dir), "--seed", "42",
-                   "--replace-fraction", "1", "--p-photo", "0"]
+                   "--metadata-csv", str(old_csv), "--images-root", str(img_dir),
+                   "--backup-dir", str(backup_dir),
+                   "--overwrite-existing-outputs",
+                   "--seed", "42", "--replace-fraction", "1", "--p-photo", "0"]
             plan = subprocess.run(cmd + ["--plan-only"], capture_output=True, text=True)
             self.assertEqual(plan.returncode, 0, plan.stderr)
-            self.assertFalse(new_csv.exists())
-            self.assertFalse(img_dir.exists())
+            self.assertEqual(old_csv.read_bytes(), initial[1])
+            self.assertFalse(backup_dir.exists())
             if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
                 self.skipTest("FFmpeg not installed")
             done = subprocess.run(cmd, capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
-            with new_csv.open(newline="", encoding="utf8") as file:
+            with old_csv.open(newline="", encoding="utf8") as file:
                 got = list(csv.DictReader(file))
             self.assertEqual(len(got), 4)
             self.assertEqual([r["augmentation_route"] for r in got],
-                             ["video_codec_frame"] * 3 + ["clean"])
+                             ["video_codec_frame_overwrite"] * 3 + ["clean"])
             self.assertEqual(got[2]["video_codec"], "hevc")
             self.assertEqual(got[2]["quality"], "single")
             for i in range(3):
                 self.assertEqual(got[i]["previous_output"], meta_rows[i]["output"])
                 self.assertTrue(Path(got[i]["output"]).exists())
-                self.assertEqual(Path(got[i]["output"]).suffix, ".png")
+                self.assertEqual(got[i]["output"], meta_rows[i]["output"])
+                self.assertEqual(Path(got[i]["output"]).suffix, ".jpg")
+                self.assertEqual(got[i]["jpeg_qf"], "100")
+                self.assertEqual(got[i]["jpeg_subsampling"], "4:4:4")
+                self.assertTrue(Path(got[i]["image_backup_path"]).exists())
                 rec = json.loads(got[i]["record_json"])
                 self.assertEqual(rec["transformation"]["video"]["codec_frame_type"], "I")
                 self.assertEqual(rec["input_metadata"]["label"], "1")
             self.assertEqual(got[3]["output"], meta_rows[3]["output"])
             self.assertEqual(frame_csv.read_bytes(), initial[0])
-            self.assertEqual(old_csv.read_bytes(), initial[1])
-            self.assertEqual([Path(row["output"]).read_bytes() for row in meta_rows],
-                             old_images)
+            self.assertNotEqual(old_csv.read_bytes(), initial[1])
+            self.assertEqual(
+                [Path(got[i]["image_backup_path"]).read_bytes() for i in range(3)],
+                old_images[:3])
+            self.assertNotEqual([Path(row["output"]).read_bytes() for row in meta_rows][:3],
+                                old_images[:3])
+            self.assertEqual(Path(meta_rows[3]["output"]).read_bytes(), old_images[3])
+            self.assertEqual(
+                (backup_dir / "metadata" / "old.csv").read_bytes(), initial[1])
             repeated = subprocess.run(cmd, capture_output=True, text=True)
             self.assertNotEqual(repeated.returncode, 0)
+            self.assertIn("Backup directory exists", repeated.stderr)
 
 
 if __name__ == "__main__":
