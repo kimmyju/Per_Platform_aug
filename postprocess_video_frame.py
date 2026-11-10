@@ -577,6 +577,15 @@ def main() -> None:
         if is_eligible(row) and rel not in frame_by_rel:
             raise ValueError(f"No original frame corresponding to {rel}")
 
+    # Do not silently re-process files already replaced by an earlier run.
+    # A second run must use the untouched backup and the original metadata.
+    already = [r["source_relative_path"] for r in existing
+               if r.get("augmentation_route", "").startswith("video_codec_frame")
+               or str(r.get("postprocess_selected", "")).lower() == "true"]
+    if already:
+        raise ValueError(
+            f"Metadata already includes video-frame replacements ({len(already)} rows). "
+            "Restore the original metadata and output backups before running again.")
     chosen = choose_subset(existing, args.replace_fraction, args.seed)
     targets: dict[int, Path] = {}
     for i in sorted(chosen):
