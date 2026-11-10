@@ -75,7 +75,7 @@ directory**, and keep the backups until validation is complete.
 - **Existing .jpg filenames stay .jpg**. To avoid broken filename extensions,
   a final JPEG QF100 / 4:4:4 re-save follows video decoding. This is an
   additional lossy delivery step, recorded as such in metadata. Existing
-  .png outputs are saved losslessly.
+  .png outputs are saved losslessly. Existing .webp outputs retain their names\n  and are saved as lossless WebP after video decoding (no added lossy WebP pass).
 - The transformed pixels derive from ORIGINAL `filepath`, **not** the old
   Perturb output. The source .jpg can already include its own original
   JPEG compression.
