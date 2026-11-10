@@ -941,6 +941,8 @@ def parse_args():
     ap.add_argument('--metadata-output', type=Path,
                     help='Optional per-output metadata location (.jsonl or .csv); '
                          'default is output/augmentation_manifest.jsonl')
+    ap.add_argument('--metadata-append', action='store_true',
+                    help='Append to an existing metadata file instead of replacing it')
     return ap.parse_args()
 
 
@@ -1066,7 +1068,7 @@ def main():
         'dry_run': args.dry_run, 'skip_video_output_probe': args.skip_video_output_probe,
     }
     counts: Counter[str] = Counter()
-    with MetadataWriter(manifest) as writer:
+    with MetadataWriter(manifest, append=args.metadata_append) as writer:
         for i, source in enumerate(sources, 1):
             src, rel, out_rel = source.path, source.rel, source.out_rel
             if src.suffix.lower() not in (IMAGE_SUFFIXES | VIDEO_SUFFIXES):

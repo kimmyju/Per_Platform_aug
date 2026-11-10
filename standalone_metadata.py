@@ -179,8 +179,9 @@ class MetadataWriter:
     .jsonl keeps native nested values. .csv additionally exposes important
     flat columns while preserving the complete original record in record_json.
     """
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, append: bool = False):
         self.path = Path(path)
+        self.append = append
         self.format = self.path.suffix.lower()
         if self.format not in (".jsonl", ".csv"):
             raise ValueError("--metadata-output must end in .jsonl or .csv")
@@ -189,11 +190,13 @@ class MetadataWriter:
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.stream = self.path.open("w", encoding="utf-8", newline="")
+        appending = self.append and self.path.is_file() and self.path.stat().st_size > 0
+        self.stream = self.path.open("a" if appending else "w", encoding="utf-8", newline="")
         if self.format == ".csv":
             self.csv_writer = csv.DictWriter(
                 self.stream, fieldnames=CSV_FIELDS, extrasaction="ignore")
-            self.csv_writer.writeheader()
+            if not appending:
+                self.csv_writer.writeheader()
         return self
 
     def write(self, record: dict[str, Any]) -> None:

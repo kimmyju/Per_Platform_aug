@@ -1,0 +1,33 @@
+Platform probability: {'clean': 0.25, 'facebook': 0.25, 'instagram': 0.25, 'kakao': 0.25}
+ERROR: [Errno 2] No such file or directory: '/media/NAS/DATASET/ProsecutorOffice/test/Real/Deepfake_Source/DeeperForensics-1.0/source_videos_part_06__source_videos__M122__light_left__contempt__camera_right__M122_light_left_contempt_camera_right/frame_02_000061.png'
+
+===== resume after deeperforensics rename 2026-11-10T01:16:56+00:00 =====
+Platform probability: {'clean': 0.25, 'facebook': 0.25, 'instagram': 0.25, 'kakao': 0.25}
+Processed 82342 source files, 1 copy/copies each
+Output manifest: /media/NAS/DATASET/ProsecutorOffice/Perturb_Test/Perturb_metadata.csv
+Route counts:
+  clean/none/le1080                  9288
+  clean/none/le2048                  7834
+  clean/none/le512                   3493
+  facebook/high/le1080               3191
+  facebook/high/le2048               2471
+  facebook/high/le512                1217
+  facebook/low/le1080                3151
+  facebook/low/le2048                2480
+  facebook/low/le512                 1151
+  facebook/mid/le1080                3162
+  facebook/mid/le2048                2567
+  facebook/mid/le512                 1131
+  instagram/shared/le1080            9287
+  instagram/shared/le2048            7586
+  instagram/shared/le512             3584
+  kakao/low/le1080                   3280
+  kakao/low/le2048                   2538
+  kakao/low/le512                    1194
+  kakao/normal/le1080                3147
+  kakao/normal/le2048                2498
+  kakao/normal/le512                 1185
+  kakao/original/le1080              3126
+  kakao/original/le2048              2632
+  kakao/original/le512               1149
+IMPORTANT: Measured reference values do not guarantee identical downstream JPEG/codec artifacts. Re-measure sample outputs.
