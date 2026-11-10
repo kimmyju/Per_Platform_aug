@@ -216,8 +216,10 @@ def encode_decode(image: Image.Image, out_png: Path, codec: str, crf: float,
     frame_type = checked_run([
         "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames",
         "-show_entries", "frame=pict_type", "-of", "csv=p=0", str(compressed)])
-    if "I" not in frame_type.splitlines():
-        raise RuntimeError(f"Expected an I-frame, got {frame_type!r}")
+    picture_types = [line.strip().split(",")[0] for line in frame_type.splitlines()
+                     if line.strip()]
+    if picture_types != ["I"]:
+        raise RuntimeError(f"Expected exactly one I-frame, got {frame_type!r}")
     checked_run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                  "-y", "-i", str(compressed), "-frames:v", "1",
                  str(out_png)])
