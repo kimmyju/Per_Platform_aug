@@ -13,5 +13,5 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -r requirements.txt
-      - run: python -m py_compile platform_aware_augment_standalone.py standalone_metadata.py test_standalone_metadata.py
-      - run: python -m unittest -v test_standalone_empirical.py test_standalone_metadata.py
+      - run: python -m py_compile platform_aware_augment_standalone.py standalone_metadata.py test_standalone_metadata.py postprocess_video_frame.py test_video_frame_postprocess.py
+      - run: python -m unittest -v test_standalone_empirical.py test_standalone_metadata.py test_video_frame_postprocess.py
