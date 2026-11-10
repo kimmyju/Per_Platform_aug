@@ -31,9 +31,15 @@ class PostprocessTests(unittest.TestCase):
                 src.parent.mkdir(parents=True, exist_ok=True)
                 size = (544, 704) if i != 2 else (1000, 1600)
                 Image.new("RGB", size, (30 + i * 30, 80, 120)).save(src)
-                old_out = root / "old" / f"frame_{i:02d}.jpg"
+                # Include a WebP existing Perturb output to guard against
+                # the exact unsupported-extension failure from real datasets.
+                old_out = root / "old" / f"frame_{i:02d}{'.webp' if i == 0 else '.jpg'}"
                 old_out.parent.mkdir(exist_ok=True)
-                shutil.copy2(src, old_out)
+                if i == 0:
+                    with Image.open(src) as im:
+                        im.save(old_out, format="WEBP", lossless=True)
+                else:
+                    shutil.copy2(src, old_out)
                 original = dict(relpath=rel, filepath=str(src), class_="Fake",
                                 label="1", category="EFS", clip_id="EFS/test/100")
                 original["class"] = original.pop("class_")
@@ -83,9 +89,18 @@ class PostprocessTests(unittest.TestCase):
                 self.assertEqual(got[i]["previous_output"], meta_rows[i]["output"])
                 self.assertTrue(Path(got[i]["output"]).exists())
                 self.assertEqual(got[i]["output"], meta_rows[i]["output"])
-                self.assertEqual(Path(got[i]["output"]).suffix, ".jpg")
-                self.assertEqual(got[i]["jpeg_qf"], "100")
-                self.assertEqual(got[i]["jpeg_subsampling"], "4:4:4")
+                expected_ext = ".webp" if i == 0 else ".jpg"
+                self.assertEqual(Path(got[i]["output"]).suffix, expected_ext)
+                with Image.open(got[i]["output"]) as image:
+                    self.assertEqual(image.format, "WEBP" if i == 0 else "JPEG")
+                if i == 0:
+                    self.assertEqual(got[i]["delivery_format"], "WEBP")
+                    self.assertEqual(got[i]["jpeg_qf"], "")
+                    self.assertTrue(json.loads(got[i]["record_json"])
+                                    ["transformation"]["delivery"]["lossless"])
+                else:
+                    self.assertEqual(got[i]["jpeg_qf"], "100")
+                    self.assertEqual(got[i]["jpeg_subsampling"], "4:4:4")
                 self.assertTrue(Path(got[i]["image_backup_path"]).exists())
                 rec = json.loads(got[i]["record_json"])
                 self.assertEqual(rec["transformation"]["video"]["codec_frame_type"], "I")
