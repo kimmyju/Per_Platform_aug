@@ -3,9 +3,11 @@
 """Replace a deterministic subset of *existing image augmentations* with video-codec
 frame augmentations, starting from ORIGINAL frames listed in frames.csv.
 
-The existing augmentation script, original frames, image outputs, and metadata CSV
-are read-only. Video-coded frames go into a separate output directory and an
-independent merged metadata CSV points to old and new files as appropriate.
+Original source frames and the main augmentation script remain unchanged. A
+deterministically selected subset of existing Perturb image files is REPLACED
+IN PLACE after generating video-codec frames from the ORIGINAL frame path.
+Both existing output images and metadata CSV are backed up before replacement.
+The metadata CSV is atomically replaced, and previous settings remain audited.
 
 A single frame is encoded as one I-picture. This approximates spatial video
 codec artifacts ONLY; it cannot reproduce inter-frame prediction, GOP effects,
@@ -42,10 +44,12 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--frames-csv", required=True, type=Path)
     ap.add_argument("--metadata-csv", required=True, type=Path,
                     help="Existing Perturb_metadata.csv, kept unchanged")
-    ap.add_argument("--output-root", required=True, type=Path,
-                    help="NEW directory for video-frame PNGs, not existing images/")
-    ap.add_argument("--metadata-output", required=True, type=Path,
-                    help="NEW merged CSV, e.g. Perturb_metadata_v2.csv")
+    ap.add_argument("--images-root", required=True, type=Path,
+                    help="Existing Perturb images/ root; output must be INSIDE this root")
+    ap.add_argument("--backup-dir", required=True, type=Path,
+                    help="NEW directory; backup original images and metadata here")
+    ap.add_argument("--overwrite-existing-outputs", action="store_true",
+                    help="Explicit consent to replace selected existing image files and metadata")
     ap.add_argument("--replace-fraction", type=float, default=1/3,
                     help="Fraction of eligible non-clean images to replace (default 1/3)")
     ap.add_argument("--seed", type=int, default=42)
@@ -59,9 +63,9 @@ def parser() -> argparse.ArgumentParser:
         "ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
         "slow", "slower", "veryslow"], default="medium")
     ap.add_argument("--plan-only", action="store_true",
-                    help="Write a plan CSV, create NO images or merged metadata")
+                    help="Write a selection plan CSV only; do not alter existing files")
     ap.add_argument("--plan-output", type=Path,
-                    help="Optional plan CSV path; default metadata-output.with_name(...plan.csv)")
+                    help="Optional plan path; default Perturb_metadata_video_frame_plan.csv")
     return ap
 
 
@@ -244,7 +248,7 @@ def video_frame_transform(src: Path, dst: Path, measured: dict[str, str],
     photo = photo_targets(measured, "video", rng, photo_args)
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
-        raise FileExistsError(f"Video-frame output exists; refusing overwrite: {dst}")
+        raise FileExistsError(f"Staging output exists; refusing overwrite: {dst}")
 
     with tempfile.TemporaryDirectory(prefix="video_frame_", dir=dst.parent) as tmp:
         work = Path(tmp)
@@ -282,21 +286,39 @@ def video_frame_transform(src: Path, dst: Path, measured: dict[str, str],
         with Image.open(chosen) as image:
             final_fit = fit_luma_ab(geometric, image.convert("RGB"))
         photo_info["final_estimate"] = final_fit
-        # A fresh temporary path and exclusive create prevent silent replacement.
-        with dst.open("xb") as out, chosen.open("rb") as inp:
-            shutil.copyfileobj(inp, out)
+        # Preserve the EXISTING output filename and extension, so downstream
+        # directory scanners and CSV consumers need no changes. For .jpg
+        # destinations, a high-quality JPEG delivery re-encode is unavoidable.
+        # Record this explicitly as an extra lossy step, never claim pure HEVC.
+        ext = dst.suffix.lower()
+        if ext == ".png":
+            with dst.open("xb") as out, chosen.open("rb") as inp:
+                shutil.copyfileobj(inp, out)
+            delivery = {"format": "PNG", "extra_jpeg_reencode": False}
+        elif ext in (".jpg", ".jpeg"):
+            with Image.open(chosen) as dec:
+                dec_rgb = dec.convert("RGB")
+                with dst.open("xb") as out:
+                    dec_rgb.save(out, format="JPEG", quality=100, subsampling=0,
+                                 progressive=False)
+            delivery = {"format": "JPEG", "extra_jpeg_reencode": True,
+                        "jpeg_qf": 100, "jpeg_subsampling": "4:4:4",
+                        "note": "Additional high-quality JPEG save to preserve old .jpg filename"}
+        else:
+            raise ValueError(f"Unsupported destination extension: {dst}")
 
     return {
         "verdict": "single_frame_video_codec_spatial_approximation",
         "pixel_transform": "video_codec_frame",
         "geometry": geometry,
         "photo": photo_info,
+        "delivery": delivery,
         "video": {
             "codec": codec, "codec_frame_type": frame_type,
             "h264_crf": round(crf, 3) if codec == "h264" else None,
             "hevc_crf": round(crf, 3) if codec == "hevc" else None,
             "crf_source": crf_origin,
-            "pixel_format": "yuv420p", "output_file_format": "PNG",
+            "pixel_format": "yuv420p", "output_file_format": delivery["format"],
             "intra_only": True, "fps_effect_applied": False,
             "gop_effect_applied": False, "bframe_effect_applied": False,
             "temporal_offset_applied": False,
@@ -315,7 +337,9 @@ ADDED_FIELDS = [
     "previous_image_quality", "previous_image_operation",
     "previous_image_input_band", "previous_effective_sample_seed",
     "video_frame_seed", "codec_frame_type", "hevc_crf",
-    "codec_quality_source", "postprocess_run",
+    "codec_quality_source", "postprocess_run", "output_replaced_in_place",
+    "image_backup_path", "metadata_backup_path", "delivery_format",
+    "delivery_jpeg_qf", "delivery_jpeg_subsampling",
 ]
 
 
@@ -330,14 +354,14 @@ def merged_record(original: dict[str, str], frame: dict[str, str] | None,
     source_meta = parse_json(original.get("input_metadata"), {}) or {}
     record = dict(previous_json)
     record["augmentation_route"] = (
-        "video_codec_frame" if dst is not None else
+        "video_codec_frame_overwrite" if dst is not None else
         "clean" if original.get("platform") == "clean" else "image")
     record["source_modality"] = "image"
     record["recipe_modality"] = "video" if dst is not None else (
         "image" if original.get("platform") != "clean" else None)
     record["postprocess_selected"] = dst is not None
     record["postprocess_run"] = {
-        "method": "video_frame_postprocess_v1", "selection_seed": options.seed,
+        "method": "video_frame_postprocess_overwrite_v2", "selection_seed": options.seed,
         "replace_fraction_of_eligible": options.replace_fraction,
         "fallback_policy": options.fallback_policy,
     }
@@ -349,7 +373,8 @@ def merged_record(original: dict[str, str], frame: dict[str, str] | None,
         "postprocess_run": json.dumps(record["postprocess_run"], sort_keys=True),
     })
     if dst is None:
-        updated["record_json"] = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        # Keep unselected record_json byte-for-byte identical; original settings
+        # must not be accidentally rewritten or fabricated.
         return updated
 
     assert frame is not None and rng_seed is not None
@@ -368,8 +393,21 @@ def merged_record(original: dict[str, str], frame: dict[str, str] | None,
     measured, _ = policy.choose(
         platform, "video", quality, video_band, w, h, rng,
         fallback_policy=options.fallback_policy)
-    transform = video_frame_transform(original_input, dst, measured,
-                                      platform, rng, options)
+    # Stage on the same filesystem as the target and atomically swap only
+    # after the video-codec image has been successfully generated.
+    with tempfile.TemporaryDirectory(prefix=".vframe_stage_", dir=dst.parent) as stage_dir:
+        staged = Path(stage_dir) / dst.name
+        transform = video_frame_transform(original_input, staged, measured,
+                                          platform, rng, options)
+        backup_rel = dst.resolve().relative_to(options.images_root.resolve())
+        backup = options.backup_dir / "images" / backup_rel
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        if backup.exists():
+            raise FileExistsError(f"Backup unexpectedly exists: {backup}")
+        shutil.copy2(dst, backup)
+        # Write a temporary copy, then atomically swap the stage into place.
+        os.replace(staged, dst)
+    options._replaced_files.append((dst, backup))
 
     previous = {
         "output": original.get("output"),
@@ -379,6 +417,7 @@ def merged_record(original: dict[str, str], frame: dict[str, str] | None,
         "input_band": original.get("input_band"),
         "effective_sample_seed": original.get("effective_sample_seed"),
     }
+    record.pop("conditional_quality_probabilities", None)
     record.update({
         "input": str(original_input), "output": str(dst),
         "status": "ok", "error": "", "modality": "image",
@@ -399,6 +438,14 @@ def merged_record(original: dict[str, str], frame: dict[str, str] | None,
         "reference_measurements_csv": "embedded_empirical_joint_observation_no_runtime_csv",
         "measured_recipe": measured, "transformation": transform,
         "input_metadata": source_meta, "previous_augmentation": previous,
+        "conditional_quality_probabilities": {quality: 1.0} if platform != "facebook"
+            else {"high": 0.5, "mid": 0.25, "low": 0.25},
+        "output_replaced_in_place": True,
+        "image_backup_path": str(backup),
+        "metadata_backup_path": str(options._metadata_backup),
+        "delivery_format": transform["delivery"]["format"],
+        "delivery_jpeg_qf": transform["delivery"].get("jpeg_qf"),
+        "delivery_jpeg_subsampling": transform["delivery"].get("jpeg_subsampling"),
         "previous_output": previous["output"], "previous_platform": previous["platform"],
         "previous_image_quality": previous["quality"],
         "previous_image_operation": previous["operation"],
@@ -418,6 +465,14 @@ def merged_record(original: dict[str, str], frame: dict[str, str] | None,
         },
     })
     updated.update(_flatten_record(record))
+    # A JPG output necessarily involves a JPEG *delivery* encode after the
+    # intra video codec. The standard jpeg_* fields must describe that step,
+    # rather than staying empty or incorrectly representing the old recipe.
+    if transform["delivery"]["extra_jpeg_reencode"]:
+        updated["jpeg_qf"] = transform["delivery"]["jpeg_qf"]
+        updated["jpeg_subsampling"] = transform["delivery"]["jpeg_subsampling"]
+        updated["jpeg_progressive"] = False
+        updated["record_json"] = json.dumps(record, ensure_ascii=False, sort_keys=True)
     for field in ADDED_FIELDS:
         value = record.get(field)
         updated[field] = (
@@ -427,9 +482,9 @@ def merged_record(original: dict[str, str], frame: dict[str, str] | None,
 
 
 def write_csv_atomic(dest: Path, fieldnames: list[str],
-                     rows: list[dict[str, Any]]) -> None:
+                     rows: list[dict[str, Any]], *, overwrite: bool = False) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
+    if dest.exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing file: {dest}")
     with tempfile.NamedTemporaryFile(
             mode="w", newline="", encoding="utf-8", dir=dest.parent,
@@ -439,10 +494,35 @@ def write_csv_atomic(dest: Path, fieldnames: list[str],
         writer.writeheader()
         writer.writerows(rows)
     try:
-        with dest.open("xb") as output, tmp.open("rb") as source:
-            shutil.copyfileobj(source, output)
+        if overwrite:
+            os.replace(tmp, dest)
+        else:
+            # Exclusive create ensures that an existing plan is never replaced.
+            with dest.open("xb") as output, tmp.open("rb") as source:
+                shutil.copyfileobj(source, output)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def restore_replacements(entries: list[tuple[Path, Path]]) -> None:
+    """Best-effort automatic rollback after any in-process failure."""
+    failures = []
+    for target, backup in reversed(entries):
+        try:
+            with tempfile.NamedTemporaryFile(
+                    dir=target.parent, prefix=".restore_", suffix=target.suffix,
+                    delete=False) as stream:
+                temp = Path(stream.name)
+            try:
+                shutil.copy2(backup, temp)
+                os.replace(temp, target)
+            finally:
+                temp.unlink(missing_ok=True)
+        except OSError as exc:
+            failures.append((str(target), str(exc)))
+    if failures:
+        print("CRITICAL: rollback incomplete! Restore from --backup-dir:", failures,
+              file=sys.stderr)
 
 
 def main() -> None:
@@ -455,108 +535,142 @@ def main() -> None:
         raise ValueError("--hevc-crf must be between 0 and 51")
     old = args.metadata_csv.resolve()
     frames_src = args.frames_csv.resolve()
-    output_csv = args.metadata_output.resolve()
-    if len({old, frames_src, output_csv}) != 3:
-        raise ValueError("Original frames/metadata and new metadata paths must differ")
-    if args.output_root.resolve() in (old.parent, frames_src.parent):
-        raise ValueError("Choose a NEW directory for video-frame images")
-    if output_csv.exists() and not args.plan_only:
-        raise FileExistsError(f"Refusing to overwrite merged metadata: {output_csv}")
+    image_root = args.images_root.resolve()
+    backup_root = args.backup_dir.resolve()
+    if old == frames_src:
+        raise ValueError("frames.csv and Perturb metadata must differ")
+    if not image_root.is_dir():
+        raise ValueError(f"Missing existing images root: {image_root}")
+    if backup_root == image_root or backup_root.is_relative_to(image_root):
+        raise ValueError("Backup must be OUTSIDE the existing images root")
+    if old.is_relative_to(backup_root) or frames_src.is_relative_to(backup_root):
+        raise ValueError("Backup directory cannot contain the input CSVs")
 
     frame_rows, _ = load_csv(args.frames_csv)
     existing, original_fields = load_csv(args.metadata_csv)
     if not existing:
         raise ValueError("Existing metadata is empty")
     frame_by_rel = {}
-    for r in frame_rows:
-        rel = r.get("relpath")
+    all_originals = set()
+    for row in frame_rows:
+        rel = row.get("relpath")
         if not rel or rel in frame_by_rel:
             raise ValueError(f"Blank or duplicate relpath in frames.csv: {rel!r}")
-        if not r.get("filepath"):
-            raise ValueError(f"Missing filepath in frames.csv for {rel}")
-        frame_by_rel[rel] = r
+        if not row.get("filepath"):
+            raise ValueError(f"Missing filepath for {rel}")
+        frame_by_rel[rel] = row
+        all_originals.add(Path(row["filepath"]).resolve())
 
-    seen = set()
-    for r in existing:
-        if not r.get("source_relative_path"):
-            raise ValueError("Missing source_relative_path in augmentation metadata")
-        key = sample_key(r)
-        if key in seen:
+    seen_keys, seen_outputs = set(), set()
+    for row in existing:
+        rel = row.get("source_relative_path")
+        if not rel:
+            raise ValueError("Missing source_relative_path in Perturb metadata")
+        key = sample_key(row)
+        if key in seen_keys:
             raise ValueError(f"Duplicate augmented frame key {key!r}")
-        seen.add(key)
-        if is_eligible(r) and r["source_relative_path"] not in frame_by_rel:
-            raise ValueError(f"No source frame for {r['source_relative_path']}")
+        seen_keys.add(key)
+        output = Path(row.get("output", "")).resolve()
+        if output in seen_outputs:
+            raise ValueError(f"Duplicate output path in Perturb metadata: {output}")
+        seen_outputs.add(output)
+        if is_eligible(row) and rel not in frame_by_rel:
+            raise ValueError(f"No original frame corresponding to {rel}")
 
     chosen = choose_subset(existing, args.replace_fraction, args.seed)
-    targets = {}
-    planned_paths: set[Path] = set()
-    for i in chosen:
+    targets: dict[int, Path] = {}
+    for i in sorted(chosen):
         row = existing[i]
-        source = frame_by_rel[row["source_relative_path"]]
-        out_rel = Path(row["source_relative_path"].replace("\\", "/"))
-        if out_rel.is_absolute() or ".." in out_rel.parts:
-            raise ValueError(f"Unsafe relative path {out_rel}")
-        norm_class = str(source.get("class", "")).strip().lower()
-        parts = list(out_rel.parts)
-        if parts and parts[0].lower() in ("real", "fake"):
-            parts = parts[1:]
-        if norm_class not in ("real", "fake") or not parts:
-            raise ValueError(f"Invalid class/relpath for {out_rel}")
-        quality = video_quality(row["platform"], row["quality"])
-        suffix = (f"{Path(parts[-1]).stem}__aug{int(row.get('copy_index') or 0):03d}_"
-                  f"{row['platform']}_{quality}_vframe.png")
-        dst = args.output_root / norm_class / Path(*parts[:-1]) / suffix
-        if dst in planned_paths:
-            raise ValueError(f"Colliding output path {dst}")
-        if dst.exists() and not args.plan_only:
-            raise FileExistsError(f"Video-frame output already exists: {dst}")
-        planned_paths.add(dst)
+        dst = Path(row["output"])
+        resolved = dst.resolve()
+        if not resolved.is_relative_to(image_root):
+            raise ValueError(f"Output is outside --images-root: {dst}")
+        if dst.is_symlink() or not dst.is_file():
+            raise ValueError(f"Output must be an existing regular file: {dst}")
+        if resolved in all_originals or resolved == old or resolved == frames_src:
+            raise ValueError(f"Refusing to overwrite an original source: {resolved}")
+        if dst.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+            raise ValueError(f"Unsupported existing image extension: {dst}")
+        source = Path(frame_by_rel[row["source_relative_path"]]["filepath"])
+        if not source.is_file():
+            raise FileNotFoundError(f"Original frame missing: {source}")
+        if row.get("input") != str(source):
+            raise ValueError(f"Original frame mismatch for {row['source_relative_path']}")
+        video_quality(row["platform"], row["quality"])
         targets[i] = dst
     print(f"Existing rows: {len(existing)}")
     print(f"Eligible non-clean image rows: {sum(is_eligible(x) for x in existing)}")
-    print(f"Selected for original-frame video-codec replacement: {len(chosen)}")
+    print(f"Selected for ORIGINAL-frame video-codec replacement: {len(chosen)}")
     print(f"Unselected rows kept: {len(existing)-len(chosen)}")
 
     if args.plan_only:
-        plan = args.plan_output or args.metadata_output.with_name(
-            args.metadata_output.stem + "_plan.csv")
+        plan = args.plan_output or args.metadata_csv.with_name(
+            "Perturb_metadata_video_frame_plan.csv")
+        if plan.resolve() in (old, frames_src):
+            raise ValueError("Plan output cannot overwrite original inputs")
         records = [{
             "source_relative_path": row["source_relative_path"],
             "original_file": frame_by_rel[row["source_relative_path"]]["filepath"],
-            "previous_output": row["output"],
-            "proposed_output": str(targets[i]),
+            "overwrite_target": str(targets[i]),
             "platform": row["platform"],
             "previous_image_quality": row["quality"],
             "video_quality": video_quality(row["platform"], row["quality"]),
         } for i, row in enumerate(existing) if i in chosen]
-        write_csv_atomic(plan, list(records[0]) if records else [
-            "source_relative_path", "original_file", "previous_output",
-            "proposed_output", "platform", "previous_image_quality", "video_quality"
-        ], records)
-        print(f"Plan only (no images generated): {plan}")
+        fields = ["source_relative_path", "original_file", "overwrite_target",
+                  "platform", "previous_image_quality", "video_quality"]
+        write_csv_atomic(plan, fields, records)
+        print(f"Plan created (nothing overwritten): {plan}")
         return
 
+    if not args.overwrite_existing_outputs:
+        raise ValueError("Actual modification requires --overwrite-existing-outputs")
+    if backup_root.exists():
+        raise FileExistsError(f"Backup directory exists; choose a NEW path: {backup_root}")
     if chosen and (shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None):
         raise RuntimeError("ffmpeg and ffprobe are required for video-frame encoding")
+
+    args._metadata_backup = backup_root / "metadata" / old.name
+    args._replaced_files = []
+    backup_root.mkdir(parents=True)
+    args._metadata_backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(old, args._metadata_backup)
     policy = MeasurementProfiles()
     out_rows = []
-    for i, row in enumerate(existing):
-        if i in chosen:
-            rng_seed = keyed_random(args.seed, sample_key(row), "video_recipe")
-            changed = merged_record(
-                row, frame_by_rel[row["source_relative_path"]],
-                targets[i], rng_seed, args, policy)
-        else:
-            changed = merged_record(row, None, None, None, args, policy)
-        out_rows.append(changed)
-        if i in chosen and (len(out_rows) % 100 == 0):
-            print(f"Processed {len(out_rows)}/{len(existing)} metadata rows", flush=True)
-
-    fields = list(dict.fromkeys(original_fields + CSV_FIELDS + ADDED_FIELDS))
-    write_csv_atomic(args.metadata_output, fields, out_rows)
-    print(f"Completed: {len(chosen)} new video-coded PNGs; original files untouched")
-    print(f"Merged metadata: {args.metadata_output}")
-    print("Important: load images by each row's output path; old/new image roots differ.")
+    try:
+        for i, row in enumerate(existing):
+            if i in chosen:
+                rng_seed = keyed_random(args.seed, sample_key(row), "video_recipe")
+                changed = merged_record(
+                    row, frame_by_rel[row["source_relative_path"]],
+                    targets[i], rng_seed, args, policy)
+            else:
+                changed = merged_record(row, None, None, None, args, policy)
+            out_rows.append(changed)
+            if i in chosen and (i + 1) % 100 == 0:
+                print(f"Processed {i+1}/{len(existing)} metadata rows", flush=True)
+        fields = list(dict.fromkeys(original_fields + CSV_FIELDS + ADDED_FIELDS))
+        # Source metadata is backed up, and replacement uses atomic rename.
+        write_csv_atomic(old, fields, out_rows, overwrite=True)
+    except BaseException:
+        restore_replacements(args._replaced_files)
+        # Metadata isn't replaced until all images succeed. Nonetheless restore
+        # from its backup, including in the unlikely event of a write failure.
+        if args._metadata_backup.is_file():
+            with tempfile.NamedTemporaryFile(
+                    dir=old.parent, prefix=".restore_metadata_", suffix=".csv",
+                    delete=False) as stream:
+                temp = Path(stream.name)
+            try:
+                shutil.copy2(args._metadata_backup, temp)
+                os.replace(temp, old)
+            finally:
+                temp.unlink(missing_ok=True)
+        raise
+    print(f"Overwritten selected existing image files: {len(chosen)}")
+    print(f"Metadata updated IN PLACE: {old}")
+    print(f"Original frames unchanged: {frames_src}")
+    print(f"Backup (original images + metadata): {backup_root}")
+    print("NOTE: JPG destination adds an explicit QF100 4:4:4 JPEG save after video codec.")
 
 
 if __name__ == "__main__":
